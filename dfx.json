@@ -1,0 +1,19 @@
+{
+  "canisters": {
+    "icrc7": {
+      "candid": "src/icrc7/icrc7.did",
+      "package": "icrc7",
+      "type": "rust",
+      "declarations": {
+        "node_compatibility": true
+      }
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "version": 1
+}

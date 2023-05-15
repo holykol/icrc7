@@ -1,0 +1,20 @@
+[package]
+name = "icrc7"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+dev = []
+
+[dependencies]
+candid = "0.8.4"
+# latest working ic-kit is, unfortunately, unpublished
+ic-kit = { path = "../../ic-kit/ic-kit"}
+ic-kit-runtime = { path = "../../ic-kit/ic-kit-runtime"}
+serde = "1.0"
+base64 = "0.21.0"

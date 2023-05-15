@@ -1,0 +1,9 @@
+{
+   "module": "CommonJS",
+   "compilerOptions": {
+      "target": "es5",
+      "strict": false,
+      "allowJs": true,
+      "declaration": false
+   },
+}
