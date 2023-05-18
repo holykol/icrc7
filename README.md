@@ -4,6 +4,11 @@
 
 Welcome to reference implementation of [ICRC-7](https://github.com/dfinity/ICRC/blob/main/ICRCs/ICRC-7/ICRC-7.md)
 
+## Getting started
+```
+dfx build && dfx deploy --argument (echo (cat deploy.txt))
+```
+
 ## Deploying yourself
 https://internetcomputer.org/docs/current/developer-docs/deploy/deploying-and-upgrading
 

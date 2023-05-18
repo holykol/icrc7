@@ -27,7 +27,11 @@ pub fn mint_token(c: &mut Collection, args: MintTokenArgs) -> Result<TokenID, St
     }
 
     if c.authority.as_ref().unwrap() != &caller() {
-        return Err("caller is not authority".to_owned());
+        return Err(format!(
+            "caller is not authority: {} != {}",
+            caller(),
+            c.authority.as_ref().unwrap(),
+        ));
     }
 
     if c.tokens.len() == c.supply_cap.unwrap_or(usize::MAX) {
@@ -75,7 +79,7 @@ pub enum AppprovalError {
     GenericError { error_code: Nat, message: String },
 }
 
-const PERMITTED_TIME_DRIFT: u64 = 2 * 60 * 1_000_000_000; // 2 minutes in nanoseconds
+pub const PERMITTED_TIME_DRIFT: u64 = 2 * 60 * 1_000_000_000; // 2 minutes in nanoseconds
 
 #[update]
 pub fn icrc7_approve(c: &mut Collection, args: ApproveArgs) -> Result<ApprovalID, AppprovalError> {
@@ -143,6 +147,13 @@ pub enum TransferError {
 
 #[update]
 pub fn icrc7_transfer(c: &mut Collection, args: TransferArgs) -> Result<TransferID, TransferError> {
+    if args.token_ids.is_empty() {
+        return Err(TransferError::GenericError {
+            error_code: 4.into(),
+            message: "token_ids must not be empty".to_string(),
+        });
+    }
+
     if let Some(created_at) = args.created_at_time {
         let now = ic::time();
         if now > created_at + PERMITTED_TIME_DRIFT {

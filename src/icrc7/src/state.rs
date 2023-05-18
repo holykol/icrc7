@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ic_kit::prelude::*;
 
@@ -24,6 +24,10 @@ impl Default for Account {
 }
 
 impl Account {
+    pub fn new(owner: Principal, subaccount: Option<Subaccount>) -> Self {
+        Account { owner, subaccount }
+    }
+
     pub fn from_owner(owner: Principal) -> Self {
         Account {
             owner,
@@ -42,7 +46,8 @@ impl Account {
     }
 }
 
-#[derive(Default)]
+/// Internal state of the canister
+#[derive(Default, Debug, Clone, Deserialize, Serialize, CandidType)]
 
 pub struct Collection {
     pub name: String,
@@ -61,11 +66,14 @@ pub struct Collection {
     pub approvals_by_principal: HashMap<Principal, Vec<ApprovalID>>,
 
     pub transfer_id_seq: TransferID,
-    pub transfers: HashMap<TransferID, Transfer>,
-    pub transfers_by_created_at: BTreeSet<(u64, TransferID)>,
+
+    // transfers are stored in a BTreeMap to allow for efficient purging of old transfers
+    // key is (transfer_timestamp, transfer_id), so we can have multiple transfers at the same nanosecond
+    // this is inspried by Redis streams ids
+    pub transfers: BTreeMap<(u64, TransferID), Transfer>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, CandidType)]
 pub struct Transfer {
     pub from: Account,
     pub to: Account,
@@ -74,7 +82,7 @@ pub struct Transfer {
     pub created_at: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize, Serialize, CandidType)]
 pub struct Approval {
     pub from: Principal,
     pub from_subaccount: Option<Subaccount>,
@@ -83,6 +91,17 @@ pub struct Approval {
     pub expires_at: Option<u64>,
     pub memo: Option<Vec<u8>>,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, CandidType)]
+pub struct Token {
+    pub id: TokenID,
+    pub name: String,
+    pub image: Vec<u8>,
+    pub owner: Account,
+}
+
+// 24h in nanoseconds
+const TX_DEDUPLICATION_WINDOW: u64 = 24 * 60 * 60 * 1_000_000_000;
 
 impl Collection {
     pub fn add_token(&mut self, token: Token) {
@@ -112,9 +131,9 @@ impl Collection {
         delegate: &Principal,
         token_id: &TokenID,
     ) -> Option<ApprovalID> {
-        let approvals = self.approvals_by_principal.get(&from_acc.owner);
+        let approvals = self.approvals_by_principal.get(&from_acc.owner)?;
 
-        for approval_id in approvals.unwrap_or(&vec![]) {
+        for approval_id in approvals {
             let approval = self.approvals.get(approval_id)?;
 
             if approval.to != *delegate {
@@ -152,9 +171,7 @@ impl Collection {
         let id = self.transfer_id_seq.clone();
         self.transfer_id_seq += 1;
 
-        self.transfers.insert(id.clone(), transfer);
-        self.transfers_by_created_at
-            .insert((created_at, id.clone()));
+        self.transfers.insert((created_at, id.clone()), transfer);
 
         id
     }
@@ -163,12 +180,10 @@ impl Collection {
         // search all transactions that happened in this nanosecond
         let range = (t.created_at, Nat::from(0))..(t.created_at + 1, Nat::from(0));
 
-        for (created_at, id) in self.transfers_by_created_at.range(range) {
+        for ((created_at, id), transfer) in self.transfers.range(range) {
             if *created_at != t.created_at {
                 break;
             }
-
-            let transfer = self.transfers.get(id).unwrap();
 
             // transfers are only equal if all fields are equal
             if transfer.from == t.from
@@ -182,11 +197,115 @@ impl Collection {
 
         None
     }
+
+    // purge old transactions and approvals
+    pub fn gc(&mut self, now: u64) {
+        // purge transactions older than TX_DEDUPLICATION_WINDOW
+        let split_key = &(now - TX_DEDUPLICATION_WINDOW, Nat::from(0));
+        // we want to keep everything after split_key
+        let after = self.transfers.split_off(&split_key);
+        self.transfers = after;
+
+        // purge expired approvals
+        self.approvals.retain(|_k, a| {
+            if a.expires_at.is_some() && a.expires_at.unwrap() < now {
+                return false;
+            }
+            true
+        });
+        self.approvals.shrink_to_fit();
+
+        self.approvals_by_principal.retain(|_k, v| {
+            v.retain(|id| self.approvals.get(id).is_some());
+            !v.is_empty()
+        });
+        self.approvals_by_principal.shrink_to_fit();
+    }
 }
 
-pub struct Token {
-    pub id: TokenID,
-    pub name: String,
-    pub image: Vec<u8>,
-    pub owner: Account,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gc() {
+        let mut c = Collection::default();
+
+        let now = 10000000000000000000;
+
+        let t1 = Transfer {
+            created_at: now - TX_DEDUPLICATION_WINDOW - 1,
+            ..Default::default()
+        };
+
+        let t2 = Transfer {
+            created_at: now - TX_DEDUPLICATION_WINDOW + 1,
+            ..Default::default()
+        };
+
+        let t3 = Transfer {
+            created_at: now + TX_DEDUPLICATION_WINDOW + 1,
+            ..Default::default()
+        };
+
+        c.add_transfer(t1.clone());
+        c.add_transfer(t2.clone());
+        c.add_transfer(t3.clone());
+
+        assert_eq!(c.transfers.len(), 3);
+
+        c.gc(now);
+
+        assert_eq!(c.transfers.len(), 2);
+        assert!(c.transfers.contains_key(&(t2.created_at, 1.into())));
+        assert!(c.transfers.contains_key(&(t3.created_at, 2.into())));
+    }
+
+    #[test]
+    fn test_gc_approvals() {
+        let mut c = Collection::default();
+
+        let now = 10000000000000000000;
+
+        let a1 = Approval {
+            expires_at: Some(now - 1),
+            from: Principal::anonymous(),
+            from_subaccount: None,
+            to: Principal::anonymous(),
+            token_ids: None,
+            memo: None,
+        };
+
+        let a2 = Approval {
+            expires_at: Some(now + 1),
+            from: Principal::anonymous(),
+            from_subaccount: None,
+            to: Principal::anonymous(),
+            token_ids: None,
+            memo: None,
+        };
+
+        let a3 = Approval {
+            expires_at: Some(now + 2),
+            from: Principal::anonymous(),
+            from_subaccount: None,
+            to: Principal::anonymous(),
+            token_ids: None,
+            memo: None,
+        };
+
+        c.add_approval(a1.clone());
+        c.add_approval(a2.clone());
+        c.add_approval(a3.clone());
+
+        assert_eq!(c.approvals.len(), 3);
+        assert_eq!(c.approvals_by_principal[&Principal::anonymous()].len(), 3);
+
+        c.gc(now);
+
+        assert_eq!(c.approvals.len(), 2);
+        assert_eq!(c.approvals_by_principal[&Principal::anonymous()].len(), 2);
+        assert!(c.approvals.contains_key(&1.into()));
+        assert!(c.approvals.contains_key(&2.into()));
+    }
 }

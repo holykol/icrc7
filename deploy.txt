@@ -4,9 +4,9 @@ symbol = "PEPE";
 description = opt "321";
 royalties = 150;
 royalty_recipient = record {
-owner = principal "sgnnd-p4rpy-xgf2h-qlgns-7fg2w-fs664-5szl6-jzxs4-lbjf3-7fzom-dqe";
+owner = principal "2vxsx-fae";
 subaccount = null;
 };
-authority = principal "sgnnd-p4rpy-xgf2h-qlgns-7fg2w-fs664-5szl6-jzxs4-lbjf3-7fzom-dqe";
+authority = principal "2vxsx-fae";
 image = opt "YXNkZmFzZGZhc2RmYXNkZmFzZGZhc2Rm";
 }

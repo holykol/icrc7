@@ -57,6 +57,24 @@ fn init(c: &mut Collection, args: InitArgs) {
     };
 }
 
+#[pre_upgrade]
+fn pre_upgrade(c: &mut Collection) {
+    let now = ic::time();
+    c.gc(now); // compact the collection before saving
+
+    #[allow(deprecated)]
+    ic_kit::stable::stable_store((c,)).expect("save state");
+}
+
+#[post_upgrade]
+fn post_upgrade(c: &mut Collection) {
+    #[allow(deprecated)]
+    let (saved_collection,): (Collection,) =
+        ic_kit::stable::stable_restore().expect("restore state");
+
+    *c = saved_collection;
+}
+
 #[query]
 fn icrc7_name(collection: &Collection) -> String {
     collection.name.to_owned()
