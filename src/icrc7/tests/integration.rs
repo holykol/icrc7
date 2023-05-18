@@ -4,8 +4,6 @@ use core::panic;
 use std::collections::HashSet;
 use std::time::Duration;
 
-use candid::Decode;
-use ic_kit::ic::CallError;
 use ic_kit::prelude::*;
 use ic_kit_runtime::handle::CanisterHandle;
 use icrc7::state::*;
@@ -413,9 +411,8 @@ async fn test_transfer_memo_deduplication(replica: Replica) {
     add_token(&c, 1.into(), "NFT-1", &owner_acc).await;
 
     let memo1 = "memo1".as_bytes().to_owned();
-    let memo2 = "memo2".as_bytes().to_owned();
 
-    let mut args = TransferArgs {
+    let args = TransferArgs {
         from: None,
         to: to_acc.clone(),
         token_ids: HashSet::from([1.into()]),
@@ -429,12 +426,228 @@ async fn test_transfer_memo_deduplication(replica: Replica) {
     let transfer_id = reply.expect("first transfer should succeed");
 
     // same memo transfer, should be deduplicated
-    let reply = perform_transfer(&c, args.clone(), to_acc.owner).await;
-    dbg!(&reply);
+    let reply = perform_transfer(&c, args.clone(), owner_acc.owner).await;
     let err = reply.expect_err("second transfer should fail");
     assert!(
         matches!(err, TransferError::Duplicate { duplicate_of } if duplicate_of == transfer_id)
     );
+}
+
+#[kit_test]
+async fn test_approvals(replica: Replica) {
+    let c = prepare_initialized_canister(&replica).await;
+
+    let owner_acc = Account::from_owner(Principal::from_slice(&[0x1]));
+    let delegate_acc = Account::from_owner(Principal::from_slice(&[0x2, 0x2]));
+    let to_acc = Account::from_owner(Principal::from_slice(&[0x3, 0x3, 0x3]));
+
+    add_token(&c, 1.into(), "NFT-1", &owner_acc).await;
+
+    let args = TransferArgs {
+        from: Some(owner_acc.clone()),
+        to: to_acc.clone(),
+        token_ids: HashSet::from([1.into()]),
+        memo: None,
+        created_at_time: None,
+        is_atomic: None,
+    };
+
+    perform_transfer(&c, args.clone(), delegate_acc.owner)
+        .await
+        .expect_err("transfer should fail");
+
+    let approve_args = ApproveArgs {
+        from_subaccount: None,
+        to: delegate_acc.owner.clone(),
+        token_ids: None,
+        memo: None,
+        created_at: None,
+        expires_at: None,
+    };
+
+    let _approval_id = c
+        .new_call("icrc7_approve")
+        .with_arg(approve_args)
+        .with_caller(owner_acc.owner)
+        .perform()
+        .await
+        .decode_one::<Result<ApprovalID, AppprovalError>>()
+        .unwrap()
+        .unwrap();
+
+    perform_transfer(&c, args.clone(), delegate_acc.owner)
+        .await
+        .expect("transfer should succeed");
+}
+
+#[kit_test]
+async fn test_approvals_for_certain_token(replica: Replica) {
+    let c = prepare_initialized_canister(&replica).await;
+
+    let owner_acc = Account::from_owner(Principal::from_slice(&[0x1]));
+    let delegate_acc = Account::from_owner(Principal::from_slice(&[0x2, 0x2]));
+    let to_acc = Account::from_owner(Principal::from_slice(&[0x3, 0x3, 0x3]));
+
+    add_token(&c, 1.into(), "NFT-1", &owner_acc).await;
+    add_token(&c, 2.into(), "NFT-2", &owner_acc).await;
+
+    // using not atomic transfer to quickly check that only one token is transferred
+    let args = TransferArgs {
+        from: Some(owner_acc.clone()),
+        to: to_acc.clone(),
+        token_ids: HashSet::from([1.into(), 2.into()]),
+        memo: None,
+        created_at_time: None,
+        is_atomic: Some(false),
+    };
+
+    let approve_args = ApproveArgs {
+        from_subaccount: None,
+        to: delegate_acc.owner.clone(),
+        token_ids: Some(HashSet::from([1.into()])),
+        memo: None,
+        created_at: None,
+        expires_at: None,
+    };
+
+    perform_approve(&c, approve_args, owner_acc.owner)
+        .await
+        .expect("approve should succeed");
+
+    perform_transfer(&c, args.clone(), delegate_acc.owner)
+        .await
+        .expect("transfer should partially succeed");
+
+    let owner_tokens: HashSet<TokenID> = c
+        .new_call("icrc7_tokens_of")
+        .with_arg(owner_acc.clone())
+        .perform()
+        .await
+        .decode_one()
+        .unwrap();
+    assert_eq!(owner_tokens, HashSet::from([2.into()]));
+
+    let to_tokens: HashSet<TokenID> = c
+        .new_call("icrc7_tokens_of")
+        .with_arg(to_acc.clone())
+        .perform()
+        .await
+        .decode_one()
+        .unwrap();
+    assert_eq!(to_tokens, HashSet::from([1.into()]));
+}
+
+#[kit_test]
+async fn test_approvals_for_different_subaccounts(replica: Replica) {
+    let c = prepare_initialized_canister(&replica).await;
+
+    let owner_acc_1 = Account::from_owner(Principal::from_slice(&[0x1]));
+    let owner_acc_2 = Account {
+        owner: Principal::from_slice(&[0x1]),
+        subaccount: Some([1; 32]),
+    };
+
+    let delegate_acc = Account::from_owner(Principal::from_slice(&[0x2, 0x2]));
+    let to_acc = Account::from_owner(Principal::from_slice(&[0x3, 0x3, 0x3]));
+
+    add_token(&c, 1.into(), "NFT-1", &owner_acc_1).await;
+    add_token(&c, 2.into(), "NFT-2", &owner_acc_2).await;
+
+    let approve_args = ApproveArgs {
+        from_subaccount: Some([1; 32]), // only allow to transfer from second subaccount
+        to: delegate_acc.owner.clone(),
+        token_ids: None,
+        memo: None,
+        created_at: None,
+        expires_at: None,
+    };
+
+    perform_approve(&c, approve_args, owner_acc_1.owner)
+        .await
+        .expect("approve should succeed");
+
+    // using not atomic transfer to quickly check that only one token is transferred
+    let mut args = TransferArgs {
+        from: Some(owner_acc_1.clone()),
+        to: to_acc.clone(),
+        token_ids: HashSet::from([1.into()]),
+        memo: None,
+        created_at_time: None,
+        is_atomic: None,
+    };
+
+    perform_transfer(&c, args.clone(), delegate_acc.owner)
+        .await
+        .expect_err("transfer should fail");
+
+    args.from = Some(owner_acc_2.clone());
+    args.token_ids = HashSet::from([2.into()]);
+
+    perform_transfer(&c, args.clone(), delegate_acc.owner)
+        .await
+        .expect("transfer should succeed");
+}
+
+#[kit_test]
+async fn test_expired_approvals(replica: Replica) {
+    let c = prepare_initialized_canister(&replica).await;
+
+    let owner_acc = Account::from_owner(Principal::from_slice(&[0x1]));
+    let delegate_acc = Account::from_owner(Principal::from_slice(&[0x2, 0x2]));
+    let to_acc = Account::from_owner(Principal::from_slice(&[0x3, 0x3, 0x3]));
+
+    add_token(&c, 1.into(), "NFT-1", &owner_acc).await;
+
+    let approve_args = ApproveArgs {
+        from_subaccount: None,
+        to: delegate_acc.owner.clone(),
+        token_ids: None,
+        memo: None,
+        created_at: None,
+        expires_at: Some(NOW - 10), // should we allow creating approvals that already expired?
+    };
+
+    perform_approve(&c, approve_args, owner_acc.owner)
+        .await
+        .expect("approve should succeed");
+
+    // using not atomic transfer to quickly check that only one token is transferred
+    let args = TransferArgs {
+        from: Some(owner_acc.clone()),
+        to: to_acc.clone(),
+        token_ids: HashSet::from([1.into()]),
+        memo: None,
+        created_at_time: None,
+        is_atomic: None,
+    };
+
+    perform_transfer(&c, args.clone(), delegate_acc.owner)
+        .await
+        .unwrap_err();
+}
+
+#[kit_test]
+async fn test_transfer_from_non_existing_account(replica: Replica) {
+    let c = prepare_initialized_canister(&replica).await;
+
+    let owner_acc = Account::default();
+    let to_acc = Account::from_owner(Principal::from_slice(&[0x22]));
+
+    let args = TransferArgs {
+        from: None,
+        to: to_acc.clone(),
+        token_ids: HashSet::from([1.into()]),
+        memo: None,
+        created_at_time: None,
+        is_atomic: None,
+    };
+
+    // cannot transfer from non-existing account
+    let reply = perform_transfer(&c, args.clone(), owner_acc.owner).await;
+    assert!(matches!(
+        reply.unwrap_err(),
+        TransferError::GenericError { .. }
+    ));
 }
 
 #[kit_test]
@@ -477,8 +690,22 @@ async fn perform_transfer(
 
     c.run_env(env)
         .await
-        .decode_one::<Result<TransferID, TransferError>>()
+        .decode_one()
         .expect("call should succeed")
+}
+
+async fn perform_approve(
+    c: &CanisterHandle<'_>,
+    args: ApproveArgs,
+    caller: Principal,
+) -> Result<ApprovalID, AppprovalError> {
+    c.new_call("icrc7_approve")
+        .with_arg(args)
+        .with_caller(caller)
+        .perform()
+        .await
+        .decode_one()
+        .unwrap()
 }
 
 #[kit_test]

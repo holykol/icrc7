@@ -11,7 +11,7 @@ type ApproveArgs = record {
   created_at : opt nat64;
   from_subaccount : opt vec nat8;
   token_ids : opt vec nat;
-  expires_at : opt int64;
+  expires_at : opt nat64;
 };
 type CollectionMetadata = record {
   icrc7_supply_cap : opt nat;

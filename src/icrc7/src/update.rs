@@ -59,12 +59,12 @@ pub fn mint_token(c: &mut Collection, args: MintTokenArgs) -> Result<TokenID, St
 
 #[derive(Debug, Deserialize, Serialize, CandidType)]
 pub struct ApproveArgs {
-    from_subaccount: Option<Subaccount>,
-    to: Principal,
-    token_ids: Option<HashSet<TokenID>>,
-    expires_at: Option<i64>,
-    memo: Option<Vec<u8>>,
-    created_at: Option<u64>,
+    pub from_subaccount: Option<Subaccount>,
+    pub to: Principal,
+    pub token_ids: Option<HashSet<TokenID>>,
+    pub expires_at: Option<u64>,
+    pub memo: Option<Vec<u8>>,
+    pub created_at: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, CandidType)]
@@ -80,6 +80,12 @@ const PERMITTED_TIME_DRIFT: u64 = 2 * 60 * 1_000_000_000; // 2 minutes in nanose
 #[update]
 pub fn icrc7_approve(c: &mut Collection, args: ApproveArgs) -> Result<ApprovalID, AppprovalError> {
     let from = caller();
+    if from == Principal::anonymous() {
+        return Err(AppprovalError::GenericError {
+            error_code: 3.into(),
+            message: "anonymous calls are not supported".to_string(),
+        });
+    }
 
     // check if caller owns all the tokens they want to approve
     if let Some(ref ids) = args.token_ids {
@@ -157,15 +163,26 @@ pub fn icrc7_transfer(c: &mut Collection, args: TransferArgs) -> Result<Transfer
         .unwrap_or(Account::from_owner(caller()))
         .to_canonical();
 
+    let transfer = Transfer {
+        from: from.clone(),
+        to: args.to.clone(),
+        token_ids: args.token_ids.clone(),
+        memo: args.memo.clone(),
+        created_at: args.created_at_time.unwrap_or(ic::time()),
+    };
+
+    if let Some(id) = c.find_duplicate_transfer(&transfer) {
+        return Err(TransferError::Duplicate { duplicate_of: id });
+    }
+
     // since updates in IC are not atomic (i.e. replying with error does not revert state changes)
     // we need to make sure we don't mutate state before checking all preconditions
     let mut apply = |dry: bool| {
         let mut errs = Vec::new();
 
         for id in &args.token_ids {
-            let token = c.tokens.get_mut(id);
             // dry run changes, before actually applying them
-            if let Err(e) = transfer_single(token, id.clone(), &from, &args, dry) {
+            if let Err(e) = transfer_single(c, id.clone(), &from, &args, dry) {
                 errs.push(e);
             }
         }
@@ -188,49 +205,44 @@ pub fn icrc7_transfer(c: &mut Collection, args: TransferArgs) -> Result<Transfer
     }
 
     // mutate
-    let id = c.add_transfer(Transfer {
-        from,
-        to: args.to,
-        token_ids: args.token_ids,
-        memo: args.memo,
-        created_at: args.created_at_time.unwrap_or(ic::time()),
-    });
+    let id = c.add_transfer(transfer);
 
     Ok(id)
 }
 
 fn transfer_single(
-    token: Option<&mut Token>,
+    c: &mut Collection,
     id: TokenID,
     from: &Account,
     args: &TransferArgs,
     dry_run: bool,
 ) -> Result<(), TransferError> {
-    let token = token.ok_or(TransferError::GenericError {
-        error_code: 1.into(),
-        message: format!("token with id {} does not exist", id),
-    })?;
+    if c.tokens.get(&id).is_none() {
+        return Err(TransferError::GenericError {
+            error_code: 1.into(),
+            message: format!("token with id {} does not exist", id),
+        });
+    }
 
-    if *from != token.owner {
-        dbg!(caller(), &token.owner);
-        todo!("approvals")
+    if from.owner != caller() {
+        // this is either approval or someone wants to transfer someone else's token
+        let approval = c.find_approval_for_delegate(from, &caller(), &id);
+        if approval.is_none() {
+            return Err(TransferError::Unauthorized {
+                token_ids: vec![id],
+            });
+        }
     }
 
     if *from == args.to {
-        dbg!(from, &args.to);
         return Err(TransferError::GenericError {
             error_code: 2.into(),
             message: "can't transfer to self".to_string(),
         });
     }
 
-    if from.owner != caller() {
-        return Err(TransferError::Unauthorized {
-            token_ids: vec![id],
-        });
-    }
-
     if !dry_run {
+        let token = c.tokens.get_mut(&id).unwrap();
         token.owner = args.to.clone().to_canonical();
     }
 
